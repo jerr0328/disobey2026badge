@@ -4,6 +4,10 @@ name = "disobey2026badge"
 rust-version = "1.91"
 version = "0.1.0"
 description = "Hardware support library for the Disobey 2026 badge (ESP32-S3)"
+license = "MIT"
+repository = "https://github.com/tanelikaivola/disobey2026badge"
+homepage = "https://github.com/tanelikaivola/disobey2026badge"
+documentation = "https://docs.rs/disobey2026badge"
 
 [dependencies]
 esp-hal = { version = "1.0.0", features = ["defmt", "esp32s3", "unstable"] }
