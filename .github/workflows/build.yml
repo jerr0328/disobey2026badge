@@ -23,17 +23,12 @@ jobs:
             ~/.cargo/bin
           key: xtensa-toolchain-v1.5-espflash
 
-      - if: steps.cache-toolchain.outputs.cache-hit != 'true'
-        uses: esp-rs/xtensa-toolchain@v1.5
+      - uses: esp-rs/xtensa-toolchain@v1.5
         with:
           default: true
           ldproxy: false
 
-      - if: steps.cache-toolchain.outputs.cache-hit != 'true'
-        run: cargo install espflash
-
-      - if: steps.cache-toolchain.outputs.cache-hit == 'true'
-        run: rustup default esp
+      - run: cargo install espflash
 
       - run: chmod +x build-all-examples.sh cargo_elf_to_esptool.sh
 
