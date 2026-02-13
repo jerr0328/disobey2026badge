@@ -2,12 +2,13 @@
 //!
 //! Set the name at compile time via the `NAME` environment variable.
 //! Optionally set `BG` and `FG` as 6-char hex RGB colors (or `BG="rainbow"`
-//! for an animated hue-cycling background), and `LEDS=heartbeat` or
+//! for an animated hue-cycling background, or `BG="retrofuture"` for an
+//! animated synthwave road with a setting sun), and `LEDS=heartbeat` or
 //! `LEDS=rainbow` for LED effects.
 //!
 //! ```sh
 //! NAME="User" BG="rainbow" FG="E0E0E0" LEDS="heartbeat" cargo run --release --example nametag
-//! NAME="Admin" BG="rainbow" FG="E00000" LEDS="rainbow" cargo run --release --example nametag
+//! NAME="Admin" BG="retrofuture" FG="E0E0E0" LEDS="rainbow" cargo run --release --example nametag
 //! NAME="Speaker" cargo run --release --example nametag
 //! ```
 
@@ -92,11 +93,17 @@ const BG_RAINBOW: bool = match BG_STR {
     None => false,
 };
 
+const BG_RETROFUTURE: bool = match BG_STR {
+    Some(s) => str_eq(s, "retrofuture"),
+    None => false,
+};
+
 const BG_COLOR: Rgb565 = match BG_STR {
     Some(s) if BG_RAINBOW => Rgb565::BLACK,
+    Some(s) if BG_RETROFUTURE => Rgb565::BLACK,
     Some(s) => match parse_hex_rgb565(s) {
         Some(c) => c,
-        None => panic!("BG must be a 6-char hex RGB string or \"rainbow\""),
+        None => panic!("BG must be a 6-char hex RGB string, \"rainbow\", or \"retrofuture\""),
     },
     None => Rgb565::new(2, 8, 20),
 };
@@ -300,6 +307,148 @@ fn is_label_pixel(px: i32, py: i32) -> bool {
     false
 }
 
+/// Retrofuture / synthwave background: gradient sky, setting sun, wireframe road grid.
+/// `frame` advances each tick to animate the road scrolling toward the viewer.
+fn retrofuture_pixel(px: i32, py: i32, frame: u32) -> Rgb565 {
+    let x = px as f32;
+    let y = py as f32;
+
+    // --- Sky region (top portion, above horizon) ---
+    let horizon_y: f32 = 95.0; // horizon line
+
+    if y < horizon_y {
+        // Gradient sky: deep purple at top -> dark orange near horizon
+        let t = y / horizon_y; // 0 at top, 1 at horizon
+
+        // Sun: centered, sitting on the horizon
+        let sun_cx: f32 = 160.0;
+        let sun_cy: f32 = horizon_y - 8.0;
+        let sun_r: f32 = 32.0;
+        let dx = x - sun_cx;
+        let dy = y - sun_cy;
+        let dist_sq = dx * dx + dy * dy;
+
+        if dist_sq < sun_r * sun_r {
+            // Inside the sun — horizontal stripe pattern for retro look
+            let stripe = ((y as u32) / 3) % 2;
+            // Only show stripes in the lower half of the sun
+            if y > sun_cy && stripe == 0 {
+                // Gap stripe — show sky through it
+                let r = (20.0 + t * 100.0) as u8;
+                let g = (0.0 + t * 20.0) as u8;
+                let b = (60.0 - t * 30.0) as u8;
+                return Rgb565::new(r >> 3, g >> 2, b >> 3);
+            }
+            // Sun gradient: bright yellow at top -> deep orange at bottom
+            let sun_t = (y - (sun_cy - sun_r)) / (2.0 * sun_r);
+            let r = (255.0 - sun_t * 40.0) as u8;
+            let g = (200.0 - sun_t * 150.0) as u8;
+            let b = (20.0 + sun_t * 10.0) as u8;
+            return Rgb565::new(r >> 3, g >> 2, b >> 3);
+        }
+
+        // Sun glow — soft halo around the sun
+        let dist = sqrt_approx(dist_sq);
+        if dist < sun_r + 25.0 {
+            let glow = 1.0 - (dist - sun_r) / 25.0;
+            let glow = glow * glow * 0.6;
+            let r = (20.0 + t * 100.0 + glow * 200.0) as u8;
+            let g = (0.0 + t * 20.0 + glow * 80.0) as u8;
+            let b = (60.0 - t * 30.0 + glow * 30.0) as u8;
+            return Rgb565::new(r >> 3, g >> 2, b >> 3);
+        }
+
+        // Sky gradient
+        let r = (20.0 + t * 100.0) as u8;
+        let g = (0.0 + t * 20.0) as u8;
+        let b = (60.0 - t * 30.0) as u8;
+        return Rgb565::new(r >> 3, g >> 2, b >> 3);
+    }
+
+    // --- Ground region (below horizon): wireframe perspective grid ---
+    let ground_y = y - horizon_y;
+    let ground_h = H as f32 - horizon_y;
+
+    // Perspective: map screen y to a "depth" value (0 = horizon/far, 1 = bottom/near)
+    // Use a power curve for more realistic perspective compression
+    let depth = ground_y / ground_h;
+    let depth = depth * depth; // quadratic for perspective
+
+    // Horizontal grid lines — spaced in perspective, scrolling toward viewer
+    let scroll = (frame as f32) * 0.15;
+    let z = 1.0 / (depth + 0.01) + scroll;
+    let grid_z = z % 4.0;
+    let h_line = grid_z < 0.3;
+
+    // Vertical grid lines — converge at vanishing point (center of screen)
+    let vp_x: f32 = 160.0; // vanishing point x
+    let spread = depth + 0.01; // how much lines spread from center
+    let local_x = (x - vp_x) / spread;
+    let grid_x = (local_x * 0.03).abs() % 4.0;
+    let v_line = grid_x < 0.4;
+
+    // Ground base color: dark purple/blue
+    let base_r: f32 = 10.0;
+    let base_g: f32 = 2.0;
+    let base_b: f32 = 30.0;
+
+    if h_line || v_line {
+        // Neon grid lines — cyan/magenta blend, brighter near viewer
+        let brightness = 0.4 + depth * 0.6;
+        // Alternate between cyan and magenta tint based on position
+        if h_line && v_line {
+            // Intersection: bright white-cyan
+            let r = (180.0 * brightness) as u8;
+            let g = (255.0 * brightness) as u8;
+            let b = (255.0 * brightness) as u8;
+            Rgb565::new(r >> 3, g >> 2, b >> 3)
+        } else if h_line {
+            // Horizontal: neon magenta/pink
+            let r = (200.0 * brightness) as u8;
+            let g = (40.0 * brightness) as u8;
+            let b = (180.0 * brightness) as u8;
+            Rgb565::new(r >> 3, g >> 2, b >> 3)
+        } else {
+            // Vertical: neon cyan
+            let r = (20.0 * brightness) as u8;
+            let g = (200.0 * brightness) as u8;
+            let b = (220.0 * brightness) as u8;
+            Rgb565::new(r >> 3, g >> 2, b >> 3)
+        }
+    } else {
+        Rgb565::new(base_r as u8 >> 3, base_g as u8 >> 2, base_b as u8 >> 3)
+    }
+}
+
+/// Fast approximate square root (for sun glow distance).
+fn sqrt_approx(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut guess = x * 0.5;
+    // Two Newton-Raphson iterations
+    guess = 0.5 * (guess + x / guess);
+    guess = 0.5 * (guess + x / guess);
+    guess
+}
+
+/// Draw the retrofuture animated frame.
+fn draw_retrofuture_frame(display: &mut Display, frame: u32, layout: &NameLayout) {
+    let area = Rectangle::new(Point::zero(), Size::new(W, H));
+    let pixels = (0u32..(W * H)).map(|i| {
+        let px = (i % W) as i32;
+        let py = (i / W) as i32;
+        if layout.is_fg(px, py) {
+            FG_COLOR
+        } else if is_label_pixel(px, py) {
+            LABEL_COLOR
+        } else {
+            retrofuture_pixel(px, py, frame)
+        }
+    });
+    display.fill_contiguous(&area, pixels).unwrap();
+}
+
 /// Draw the full frame in a single `fill_contiguous` call — no flicker.
 fn draw_frame(display: &mut Display, bg: Rgb565, layout: &NameLayout) {
     let area = Rectangle::new(Point::zero(), Size::new(W, H));
@@ -333,6 +482,13 @@ async fn display_task(
             let bg = hue_to_rgb565(hue as f32, 0.4);
             draw_frame(display, bg, &layout);
             hue = (hue + 2) % 360;
+            Timer::after(Duration::from_millis(50)).await;
+        }
+    } else if BG_RETROFUTURE {
+        let mut frame = 0u32;
+        loop {
+            draw_retrofuture_frame(display, frame, &layout);
+            frame = frame.wrapping_add(1);
             Timer::after(Duration::from_millis(50)).await;
         }
     } else {
