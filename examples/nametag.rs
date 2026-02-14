@@ -4,13 +4,15 @@
 //! Optionally set `BG` and `FG` as 6-char hex RGB colors (or `BG="rainbow"`
 //! for an animated hue-cycling background, `BG="retrofuture"` for an
 //! animated synthwave road with a setting sun, or `BG="hearts"` for
-//! floating hearts), and `LEDS=heartbeat` or `LEDS=rainbow` for LED effects.
+//! floating hearts), and `LEDS=heartbeat`, `LEDS=rainbow`, or `LEDS="FF8800"`
+//! (6-char hex RGB) for LED effects.
 //!
 //! ```sh
 //! NAME="User" BG="rainbow" FG="E0E0E0" LEDS="heartbeat" cargo run --release --example nametag
 //! NAME="Admin" BG="retrofuture" FG="E0E0E0" LEDS="rainbow" cargo run --release --example nametag
 //! NAME="Speaker" cargo run --release --example nametag
 //! NAME="Love" BG="hearts" FG="FFE0E0" LEDS="heartbeat" cargo run --release --example nametag
+//! NAME="Hacker" BG="000000" FG="00FF00" LEDS="00FF00" cargo run --release --example nametag
 //! ```
 
 #![no_std]
@@ -56,6 +58,23 @@ const fn parse_hex_rgb565(s: &str) -> Option<Rgb565> {
     // Rgb565: 5 bits red, 6 bits green, 5 bits blue
     Some(Rgb565::new(r >> 3, g >> 2, b >> 3))
 }
+/// Parse a hex color string like "FF8800" into Srgb<u8> at const time.
+/// Returns None if the string is not exactly 6 hex chars.
+const fn parse_hex_srgb(s: &str) -> Option<Srgb<u8>> {
+    let b = s.as_bytes();
+    if b.len() != 6 {
+        return None;
+    }
+    let Some(r) = hex_byte(b[0], b[1]) else { return None };
+    let Some(g) = hex_byte(b[2], b[3]) else { return None };
+    let Some(b) = hex_byte(b[4], b[5]) else { return None };
+    Some(Srgb::new(r, g, b))
+}
+/// Parsed LED hex color (if LEDS is a 6-char hex string).
+const LED_COLOR: Option<Srgb<u8>> = match LEDS {
+    Some(s) => parse_hex_srgb(s),
+    None => None,
+};
 
 const fn hex_digit(c: u8) -> Option<u8> {
     match c {
@@ -684,6 +703,16 @@ async fn rainbow_task(leds: &'static mut Leds<'static>) {
         Timer::after(Duration::from_millis(50)).await;
     }
 }
+#[embassy_executor::task]
+async fn static_color_task(leds: &'static mut Leds<'static>, color: Srgb<u8>) {
+    info!("Static LED color task started");
+    leds.fill(color);
+    leds.update().await;
+    // Nothing else to do — LEDs stay on.
+    loop {
+        Timer::after(Duration::from_secs(600)).await;
+    }
+}
 
 
 
@@ -709,6 +738,10 @@ async fn main(spawner: Spawner) -> ! {
         Some("rainbow") => {
             let leds = mk_static!(Leds<'static>, resources.leds.into());
             spawner.must_spawn(rainbow_task(leds));
+        }
+        _ if LED_COLOR.is_some() => {
+            let leds = mk_static!(Leds<'static>, resources.leds.into());
+            spawner.must_spawn(static_color_task(leds, LED_COLOR.unwrap()));
         }
         _ => {}
     }
