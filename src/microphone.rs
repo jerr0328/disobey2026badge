@@ -47,15 +47,15 @@ impl<'a> Microphone<'a> {
             Config::new_tdm_philips()
                 .with_sample_rate(Rate::from_hz(sample_rate))
                 .with_data_format(DataFormat::Data16Channel16)
-                .with_channels(Channels::MONO),
+                .with_channels(Channels::LEFT),
         )
         .unwrap();
 
         let rx = i2s
             .i2s_rx
-            .with_bclk(res.dio)
+            .with_bclk(res.sd)
             .with_ws(res.ws)
-            .with_din(res.sd)
+            .with_din(res.dio)
             .build(descriptors);
 
         Self { rx }
