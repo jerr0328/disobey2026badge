@@ -38,7 +38,6 @@ palette = { version = "0.7.6", default-features = false, features = [
 critical-section = "1.2.0"
 static_cell = "2.1.1"
 embassy-sync = { version = "0.7.2", default-features = false, features = ["defmt"] }
-tinybmp = "0.7.0"
 
 [profile.dev]
 opt-level = "s"
@@ -52,3 +51,6 @@ lto = true
 opt-level = 's'
 overflow-checks = false
 strip = "debuginfo"
+
+[dev-dependencies]
+tinybmp = "0.7.0"
