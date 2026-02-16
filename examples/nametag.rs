@@ -484,34 +484,34 @@ fn heart_sdf(px: f32, py: f32) -> f32 {
 const NUM_HEARTS: u32 = 10;
 
 /// Compute the color for a hearts-background pixel at (px, py) for the given frame.
-fn hearts_pixel(px: i32, py: i32, frame: u32) -> Rgb565 {
-    let fx = px as f32;
-    let fy = py as f32;
+/// Per-heart state precomputed once per frame.
+struct HeartState {
+    cx: f32,
+    cy: f32,
+    inv_size: f32,
+    hr: f32,
+    hg: f32,
+    hb: f32,
+    y_min: i32,
+    y_max: i32,
+    x_min: i32,
+    x_max: i32,
+}
 
-    // Dark background with a subtle gradient
-    let bg_r = 5.0 + (fy / H as f32) * 15.0;
-    let bg_g = 0.0;
-    let bg_b = 15.0 + (fy / H as f32) * 20.0;
-
-    let mut r = bg_r;
-    let mut g = bg_g;
-    let mut b = bg_b;
-
+/// Precompute all heart positions and colors for the given frame.
+fn precompute_hearts(frame: u32) -> [HeartState; NUM_HEARTS as usize] {
+    let mut hearts: [HeartState; NUM_HEARTS as usize] = unsafe { core::mem::zeroed() };
     for i in 0..NUM_HEARTS {
         let seed = hash_u32(i * 7 + 31);
-        // Each heart has a fixed x column, a size, and a speed
         let hx = (seed % W) as f32;
         let size = 30.0 + (hash_u32(seed + 3) % 25) as f32;
         let speed = 1.0 + (hash_u32(seed + 7) % 10) as f32 * 0.3;
         let phase = (hash_u32(seed + 13) % 1000) as f32;
 
-        // Float upward: y decreases over time, wrapping around
         let total_h = H as f32 + size * 2.0;
         let raw_y = phase + frame as f32 * speed;
-        // Heart moves from bottom to top
         let hy = H as f32 + size - (raw_y % total_h);
 
-        // Gentle horizontal wobble using triangle wave (no sin needed)
         let wobble_period = 200.0;
         let wobble_phase = raw_y % wobble_period;
         let wobble = if wobble_phase < wobble_period * 0.5 {
@@ -521,92 +521,118 @@ fn hearts_pixel(px: i32, py: i32, frame: u32) -> Rgb565 {
         } * 12.0;
         let cx = hx + wobble;
 
-        // Transform pixel into heart-local coords, normalized to ~[-1.3,1.3]
-        // Flip y so lobes are on top, point is at bottom
-        let lx = (fx - cx) / size;
-        let ly = -(fy - hy) / size;
+        let margin = size * 1.4;
+        let hue_offset = (hash_u32(seed + 19) % 40) as f32;
 
-        let dist = heart_sdf(lx, ly);
+        hearts[i as usize] = HeartState {
+            cx,
+            cy: hy,
+            inv_size: 1.0 / size,
+            hr: 200.0 + hue_offset,
+            hg: 20.0 + hue_offset * 0.5,
+            hb: 60.0 + hue_offset * 1.5,
+            y_min: (hy - margin) as i32,
+            y_max: (hy + margin) as i32,
+            x_min: (cx - margin) as i32,
+            x_max: (cx + margin) as i32,
+        };
+    }
+    hearts
+}
 
-        if dist < 0.0 {
-            // Inside the heart — pick a pink/red hue per heart
-            let hue_offset = (hash_u32(seed + 19) % 40) as f32; // 0..40
-            let hr = 200.0 + hue_offset;
-            let hg = 20.0 + hue_offset * 0.5;
-            let hb = 60.0 + hue_offset * 1.5;
-            // Slight brightness variation toward edges
-            let edge = 1.0 + dist * 1.5; // dist is negative inside, so edge < 1 at edges
-            r = hr * edge;
-            g = hg * edge;
-            b = hb * edge;
-        } else if dist < 0.15 {
-            // Soft glow around heart
-            let glow = 1.0 - dist / 0.15;
-            let glow = glow * glow * 0.3;
-            r += 180.0 * glow;
-            g += 20.0 * glow;
-            b += 60.0 * glow;
+/// Stamp the name and label text onto a pre-rendered framebuffer.
+fn stamp_text(buf: &mut [Rgb565], layout: &NameLayout) {
+    for i in 0..(W * H) as usize {
+        let px = (i % W as usize) as i32;
+        let py = (i / W as usize) as i32;
+        if layout.is_fg(px, py) {
+            buf[i] = FG_COLOR;
+        } else if is_label_pixel(px, py) {
+            buf[i] = LABEL_COLOR;
         }
     }
-
-    // Clamp
-    if r > 255.0 { r = 255.0; }
-    if g > 255.0 { g = 255.0; }
-    if b > 255.0 { b = 255.0; }
-
-    Rgb565::new(r as u8 >> 3, g as u8 >> 2, b as u8 >> 3)
 }
 
-/// Draw the hearts animated frame.
-fn draw_hearts_frame(display: &mut Display, frame: u32, layout: &NameLayout) {
-    let area = Rectangle::new(Point::zero(), Size::new(W, H));
-    let pixels = (0u32..(W * H)).map(|i| {
-        let px = (i % W) as i32;
-        let py = (i / W) as i32;
-        if layout.is_fg(px, py) {
-            FG_COLOR
-        } else if is_label_pixel(px, py) {
-            LABEL_COLOR
-        } else {
-            hearts_pixel(px, py, frame)
+/// Draw the hearts animated frame using a framebuffer.
+fn draw_hearts_frame(display: &mut Display, frame: u32, layout: &NameLayout, buf: &mut [Rgb565]) {
+    let hearts = precompute_hearts(frame);
+
+    // 1. Render background + hearts into buffer
+    for i in 0..(W * H) as usize {
+        let px = (i % W as usize) as i32;
+        let py = (i / W as usize) as i32;
+        let fy = py as f32;
+        let fx = px as f32;
+
+        let mut r = 5.0 + (fy / H as f32) * 15.0;
+        let mut g: f32 = 0.0;
+        let mut b = 15.0 + (fy / H as f32) * 20.0;
+
+        for h in &hearts {
+            if py < h.y_min || py > h.y_max { continue; }
+            if px < h.x_min || px > h.x_max { continue; }
+
+            let lx = (fx - h.cx) * h.inv_size;
+            let ly = -(fy - h.cy) * h.inv_size;
+            let dist = heart_sdf(lx, ly);
+
+            if dist < 0.0 {
+                let edge = 1.0 + dist * 1.5;
+                r = h.hr * edge;
+                g = h.hg * edge;
+                b = h.hb * edge;
+            } else if dist < 0.15 {
+                let glow = 1.0 - dist / 0.15;
+                let glow = glow * glow * 0.3;
+                r += 180.0 * glow;
+                g += 20.0 * glow;
+                b += 60.0 * glow;
+            }
         }
-    });
-    display.fill_contiguous(&area, pixels).unwrap();
+
+        if r > 255.0 { r = 255.0; }
+        if g > 255.0 { g = 255.0; }
+        if b > 255.0 { b = 255.0; }
+
+        buf[i] = Rgb565::new(r as u8 >> 3, g as u8 >> 2, b as u8 >> 3);
+    }
+
+    // 2. Stamp text on top
+    stamp_text(buf, layout);
+
+    // 3. Send to display
+    let area = Rectangle::new(Point::zero(), Size::new(W, H));
+    display.fill_contiguous(&area, buf.iter().copied()).unwrap();
 }
 
+/// Draw the retrofuture animated frame using a framebuffer.
+fn draw_retrofuture_frame(display: &mut Display, frame: u32, layout: &NameLayout, buf: &mut [Rgb565]) {
+    // 1. Render background into buffer
+    for i in 0..(W * H) as usize {
+        let px = (i % W as usize) as i32;
+        let py = (i / W as usize) as i32;
+        buf[i] = retrofuture_pixel(px, py, frame);
+    }
 
-/// Draw the retrofuture animated frame.
-fn draw_retrofuture_frame(display: &mut Display, frame: u32, layout: &NameLayout) {
+    // 2. Stamp text on top
+    stamp_text(buf, layout);
+
+    // 3. Send to display
     let area = Rectangle::new(Point::zero(), Size::new(W, H));
-    let pixels = (0u32..(W * H)).map(|i| {
-        let px = (i % W) as i32;
-        let py = (i / W) as i32;
-        if layout.is_fg(px, py) {
-            FG_COLOR
-        } else if is_label_pixel(px, py) {
-            LABEL_COLOR
-        } else {
-            retrofuture_pixel(px, py, frame)
-        }
-    });
-    display.fill_contiguous(&area, pixels).unwrap();
+    display.fill_contiguous(&area, buf.iter().copied()).unwrap();
 }
 
-/// Draw the full frame in a single `fill_contiguous` call — no flicker.
-fn draw_frame(display: &mut Display, bg: Rgb565, layout: &NameLayout) {
+/// Draw a static-color frame using the shared framebuffer.
+fn draw_frame(display: &mut Display, bg: Rgb565, layout: &NameLayout, buf: &mut [Rgb565]) {
+    // 1. Fill background
+    buf.fill(bg);
+
+    // 2. Stamp text on top
+    stamp_text(buf, layout);
+
+    // 3. Send to display
     let area = Rectangle::new(Point::zero(), Size::new(W, H));
-    let pixels = (0u32..(W * H)).map(|i| {
-        let px = (i % W) as i32;
-        let py = (i / W) as i32;
-        if layout.is_fg(px, py) {
-            FG_COLOR
-        } else if is_label_pixel(px, py) {
-            LABEL_COLOR
-        } else {
-            bg
-        }
-    });
-    display.fill_contiguous(&area, pixels).unwrap();
+    display.fill_contiguous(&area, buf.iter().copied()).unwrap();
 }
 
 #[embassy_executor::task]
@@ -619,30 +645,33 @@ async fn display_task(
 
     let layout = NameLayout::compute();
 
+    // Allocate a shared framebuffer on the heap (320×170 pixels × 2 bytes = 108,800 bytes).
+    let mut buf = alloc::vec![Rgb565::BLACK; (W * H) as usize];
+
     if BG_RAINBOW {
         let mut hue = 0u16;
         loop {
             let bg = hue_to_rgb565(hue as f32, 0.4);
-            draw_frame(display, bg, &layout);
+            draw_frame(display, bg, &layout, &mut buf);
             hue = (hue + 2) % 360;
             Timer::after(Duration::from_millis(50)).await;
         }
     } else if BG_RETROFUTURE {
         let mut frame = 0u32;
         loop {
-            draw_retrofuture_frame(display, frame, &layout);
+            draw_retrofuture_frame(display, frame, &layout, &mut buf);
             frame = frame.wrapping_add(1);
             Timer::after(Duration::from_millis(50)).await;
         }
     } else if BG_HEARTS {
         let mut frame = 0u32;
         loop {
-            draw_hearts_frame(display, frame, &layout);
+            draw_hearts_frame(display, frame, &layout, &mut buf);
             frame = frame.wrapping_add(1);
             Timer::after(Duration::from_millis(50)).await;
         }
     } else {
-        draw_frame(display, BG_COLOR, &layout);
+        draw_frame(display, BG_COLOR, &layout, &mut buf);
         loop {
             Timer::after(Duration::from_secs(600)).await;
         }
@@ -721,7 +750,7 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = disobey2026badge::init();
     let resources = split_resources!(peripherals);
 
-    esp_alloc::heap_allocator!(size: 64 * 1024);
+    esp_alloc::heap_allocator!(size: 192 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
